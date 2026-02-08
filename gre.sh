@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================
-# GRE Tunnel Setup Script v2.0 - Enhanced
+# GRE Tunnel Setup Script v3.0 - Performance Optimized
 # GitHub: netplas
 # ============================================
 
@@ -10,6 +10,7 @@ CYAN=$(tput setaf 6)
 YELLOW=$(tput setaf 3)
 GREEN=$(tput setaf 2)
 RED=$(tput setaf 1)
+BLUE=$(tput setaf 4)
 RESET=$(tput sgr0)
 BOLD=$(tput bold)
 
@@ -19,7 +20,7 @@ show_header() {
     echo -e "${CYAN}${BOLD}"
     echo "============================================"
     echo "        GitHub: netplas"
-    echo "   GRE Tunnel v2.0 - Enhanced Setup"
+    echo "   GRE Tunnel v3.0 - Performance Optimized"
     echo "============================================"
     echo -e "${RESET}"
 }
@@ -32,360 +33,390 @@ check_root() {
     fi
 }
 
-# Function to check dependencies
-check_dependencies() {
-    local deps=("ip" "iptables" "sysctl" "ping")
-    local missing=()
+# Function to check and install dependencies
+install_dependencies() {
+    echo -e "${CYAN}[*] Checking and installing dependencies...${RESET}"
     
-    for dep in "${deps[@]}"; do
-        if ! command -v $dep &> /dev/null; then
-            missing+=("$dep")
-        fi
-    done
+    local pkgs=""
     
-    if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${YELLOW}[!] Missing dependencies: ${missing[*]}${RESET}"
-        echo "Installing required packages..."
-        
-        if command -v apt &> /dev/null; then
-            apt update && apt install -y iproute2 iptables procps iputils-ping
-        elif command -v yum &> /dev/null; then
-            yum install -y iproute iptables procps-ng iputils
-        elif command -v dnf &> /dev/null; then
-            dnf install -y iproute iptables procps-ng iputils
-        else
-            echo -e "${RED}[!] Cannot install dependencies automatically${RESET}"
-            exit 1
-        fi
+    if command -v apt &> /dev/null; then
+        pkgs="iproute2 iptables iptables-persistent net-tools iputils-ping ethtool"
+        apt update && apt install -y $pkgs
+    elif command -v yum &> /dev/null; then
+        pkgs="iproute iptables iptables-services net-tools iputils ethtool"
+        yum install -y $pkgs
+    elif command -v dnf &> /dev/null; then
+        dnf install -y $pkgs
+    fi
+    
+    # Check for BBR availability
+    if ! sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
+        echo -e "${YELLOW}[!] BBR not available in kernel${RESET}"
     fi
 }
 
-# Function to check internet connection
-check_internet() {
-    echo -n "[*] Checking internet connection... "
-    if ping -c 2 -W 3 8.8.8.8 &> /dev/null; then
-        echo -e "${GREEN}OK${RESET}"
+# Function to optimize system for GRE tunnel
+optimize_system() {
+    echo -e "${CYAN}[*] Optimizing system parameters...${RESET}"
+    
+    # TCP Optimization
+    cat >> /etc/sysctl.conf << EOF
+
+# GRE Tunnel Optimizations
+# TCP Settings
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 87380 134217728
+net.ipv4.tcp_wmem = 4096 65536 134217728
+net.core.netdev_max_backlog = 5000
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 15
+
+# GRE Specific
+net.ipv4.gre.flush = 1
+net.ipv4.ip_no_pmtu_disc = 0
+net.ipv4.route.flush = 1
+
+# Forwarding
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding = 1
+EOF
+
+    # Apply immediately
+    sysctl -p
+}
+
+# Function to calculate optimal MTU
+calculate_mtu() {
+    local public_iface=$(ip route | grep default | awk '{print $5}' | head -1)
+    local base_mtu=$(ip link show $public_iface 2>/dev/null | grep mtu | awk '{print $5}')
+    
+    if [[ -z "$base_mtu" ]]; then
+        echo "1476"  # Default if cannot detect
     else
-        echo -e "${YELLOW}Warning: No internet connection${RESET}"
+        # GRE adds 24 bytes overhead, so subtract that
+        local tunnel_mtu=$((base_mtu - 24))
+        echo "$tunnel_mtu"
     fi
 }
 
 # Function to setup IRAN server
 setup_iran() {
-    echo -e "${CYAN}[*] Configuring IRAN Server...${RESET}"
+    echo -e "${CYAN}[*] Configuring IRAN Server (Performance Mode)...${RESET}"
     
-    # 1. Remove existing tunnel if exists
-    echo "[1] Cleaning up existing tunnel..."
+    # Remove existing tunnel
     ip link del netplas-m2 2>/dev/null
     
-    # 2. Set MTU on main interface
-    echo "[2] Setting MTU on main interface..."
-    ip link set dev eth0 mtu 1500 2>/dev/null || echo "Warning: Could not set MTU on eth0"
+    # Get optimal MTU
+    local OPTIMAL_MTU=$(calculate_mtu)
+    echo "[+] Using MTU: $OPTIMAL_MTU"
     
-    # 3. Create GRE tunnel
-    echo "[3] Creating GRE tunnel..."
-    ip tunnel add netplas-m2 mode gre local $IP_IRAN remote $IP_FOREIGN ttl 255
+    # Create GRE tunnel with optimal parameters
+    echo "[1] Creating optimized GRE tunnel..."
+    ip tunnel add netplas-m2 mode gre local $IP_IRAN remote $IP_FOREIGN ttl 255 tos inherit
     if [ $? -ne 0 ]; then
         echo -e "${RED}[!] Failed to create tunnel${RESET}"
         return 1
     fi
     
-    # 4. Activate and configure tunnel IP
-    echo "[4] Configuring tunnel interface..."
-    ip link set netplas-m2 up mtu 1476
+    # Configure interface with performance settings
+    echo "[2] Configuring tunnel interface..."
+    ip link set netplas-m2 up mtu $OPTIMAL_MTU txqueuelen 1000
     ip addr add 132.168.30.2/30 dev netplas-m2
     ip route add 132.168.30.0/30 dev netplas-m2
     
-    # 5. Sysctl settings
-    echo "[5] Configuring kernel parameters..."
-    sysctl -w net.ipv4.ip_forward=1
-    sysctl -w net.ipv4.conf.all.forwarding=1
-    sysctl -w net.ipv4.conf.default.forwarding=1
-    sysctl -w net.ipv4.gre.keepalive_probes=30
-    sysctl -w net.ipv4.gre.keepalive_intvl=5
-    sysctl -w net.ipv4.gre.keepalive_time=30
-    sysctl -w net.ipv4.tcp_mtu_probing=2
-    sysctl -w net.ipv4.tcp_sack=1
-    sysctl -w net.ipv4.tcp_window_scaling=1
+    # Add default route through tunnel for specific traffic
+    ip route add default via 132.168.30.1 dev netplas-m2 metric 100
     
-    # 6. Iptables configuration
-    echo "[6] Configuring iptables rules..."
+    # Enable TCP BBR if available
+    echo "[3] Enabling TCP optimizations..."
+    sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || echo "BBR not available"
+    sysctl -w net.ipv4.tcp_notsent_lowat=16384
+    sysctl -w net.ipv4.tcp_mtu_probing=1
     
-    # Clean previous rules
+    # Configure iptables for performance
+    echo "[4] Configuring iptables for performance..."
+    
+    # Flush existing rules
+    iptables -F
     iptables -t nat -F
     iptables -t mangle -F
-    iptables -F
     
-    # Set MSS for tunnel
-    iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o netplas-m2 -j TCPMSS --set-mss 1380
+    # MSS Clamping (CRITICAL for performance)
+    iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     
-    # NAT Rules
+    # Specific MSS for GRE tunnel
+    local MSS_VALUE=$((OPTIMAL_MTU - 40))
+    iptables -t mangle -A POSTROUTING -o netplas-m2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VALUE
+    
+    # NAT Configuration
     iptables -t nat -A PREROUTING -p tcp --dport 22 -j DNAT --to-destination 132.168.30.2
     iptables -t nat -A PREROUTING -i eth0 -d $IP_IRAN -j DNAT --to-destination 132.168.30.1
     
-    # Route traffic from tunnel
-    iptables -t nat -A POSTROUTING -o netplas-m2 -j MASQUERADE
+    # Performance-focused MASQUERADE
+    iptables -t nat -A POSTROUTING -o netplas-m2 -j MASQUERADE --random-fully
     
-    # Allow ICMP (for ping)
-    iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
-    iptables -A OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT
+    # Connection tracking optimization
+    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     
-    # 7. QoS with tc
-    echo "[7] Setting up QoS..."
-    tc qdisc add dev netplas-m2 root fq 2>/dev/null || echo "tc not available, skipping QoS"
+    # Setup traffic shaping with tc (if available)
+    echo "[5] Setting up traffic shaping..."
+    if command -v tc &> /dev/null; then
+        # Clean existing qdisc
+        tc qdisc del dev netplas-m2 root 2>/dev/null
+        
+        # FQ_Codel for better latency under load
+        tc qdisc add dev netplas-m2 root fq_codel quantum 300 limit 10240 flows 4096
+        
+        # If you know your bandwidth, you can add shaping:
+        # tc qdisc add dev netplas-m2 root tbf rate 100mbit burst 256kbit latency 50ms
+    else
+        echo "tc not available, skipping traffic shaping"
+    fi
     
-    echo -e "${GREEN}[+] IRAN server configuration completed${RESET}"
+    # Enable IRQ balancing for better CPU utilization
+    if [ -f /proc/interrupts ] && command -v ethtool &> /dev/null; then
+        echo "[6] Optimizing network interrupts..."
+        ethtool -C eth0 rx-usecs 8 rx-frames 32 2>/dev/null || true
+        ethtool -K eth0 gro on gso on tso on 2>/dev/null || true
+    fi
+    
+    # Create persistent configuration
+    create_persistent_config
+    
+    echo -e "${GREEN}[+] IRAN server configured for performance${RESET}"
     return 0
 }
 
 # Function to setup FOREIGN server
 setup_foreign() {
-    echo -e "${CYAN}[*] Configuring FOREIGN Server...${RESET}"
+    echo -e "${CYAN}[*] Configuring FOREIGN Server (Performance Mode)...${RESET}"
     
-    # 1. Remove existing tunnel
-    echo "[1] Cleaning up existing tunnel..."
+    # Remove existing tunnel
     ip link del netplas-m2 2>/dev/null
     
-    # 2. Create GRE tunnel
-    echo "[2] Creating GRE tunnel..."
-    ip tunnel add netplas-m2 mode gre local $IP_FOREIGN remote $IP_IRAN ttl 255
+    # Get optimal MTU
+    local OPTIMAL_MTU=$(calculate_mtu)
+    echo "[+] Using MTU: $OPTIMAL_MTU"
+    
+    # Create GRE tunnel
+    echo "[1] Creating optimized GRE tunnel..."
+    ip tunnel add netplas-m2 mode gre local $IP_FOREIGN remote $IP_IRAN ttl 255 tos inherit
     if [ $? -ne 0 ]; then
         echo -e "${RED}[!] Failed to create tunnel${RESET}"
         return 1
     fi
     
-    # 3. Activate and configure tunnel IP
-    echo "[3] Configuring tunnel interface..."
-    ip link set netplas-m2 up mtu 1476
+    # Configure interface
+    echo "[2] Configuring tunnel interface..."
+    ip link set netplas-m2 up mtu $OPTIMAL_MTU txqueuelen 1000
     ip addr add 132.168.30.1/30 dev netplas-m2
     ip route add 132.168.30.0/30 dev netplas-m2
     
-    # 4. Sysctl settings
-    echo "[4] Configuring kernel parameters..."
-    sysctl -w net.ipv4.ip_forward=1
-    sysctl -w net.ipv4.conf.all.forwarding=1
-    sysctl -w net.ipv4.conf.default.forwarding=1
-    sysctl -w net.ipv4.gre.keepalive_probes=30
-    sysctl -w net.ipv4.gre.keepalive_intvl=5
-    sysctl -w net.ipv4.gre.keepalive_time=30
+    # Enable TCP optimizations
+    echo "[3] Enabling TCP optimizations..."
+    sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || sysctl -w net.ipv4.tcp_congestion_control=cubic
+    sysctl -w net.ipv4.tcp_slow_start_after_idle=0
+    sysctl -w net.ipv4.tcp_mtu_probing=1
     
-    # 5. Iptables configuration
-    echo "[5] Configuring iptables rules..."
+    # Configure iptables
+    echo "[4] Configuring iptables..."
     
-    # Clean rules
+    # Flush rules
     iptables -F
     iptables -t nat -F
     iptables -t mangle -F
     
-    # Block ICMP from outside (security)
+    # MSS Clamping
+    local MSS_VALUE=$((OPTIMAL_MTU - 40))
+    iptables -t mangle -A POSTROUTING -o netplas-m2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss $MSS_VALUE
+    
+    # Security rules
     iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
     iptables -A INPUT -p icmp --icmp-type echo-reply -j ACCEPT
     iptables -A OUTPUT -p icmp --icmp-type echo-request -j ACCEPT
     
-    # Set MSS for tunnel
-    iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o netplas-m2 -j TCPMSS --set-mss 1380
+    # Connection tracking
+    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     
-    # 6. QoS
-    echo "[6] Setting up QoS..."
-    tc qdisc add dev netplas-m2 root fq 2>/dev/null || echo "tc not available, skipping QoS"
+    # Traffic shaping
+    echo "[5] Setting up traffic shaping..."
+    if command -v tc &> /dev/null; then
+        tc qdisc del dev netplas-m2 root 2>/dev/null
+        tc qdisc add dev netplas-m2 root fq_codel quantum 300 limit 10240 flows 4096
+    fi
     
-    echo -e "${GREEN}[+] FOREIGN server configuration completed${RESET}"
+    # Create persistent configuration
+    create_persistent_config
+    
+    echo -e "${GREEN}[+] FOREIGN server configured for performance${RESET}"
     return 0
 }
 
-# Function to test tunnel
-test_tunnel() {
-    echo -e "${CYAN}[*] Testing tunnel connection...${RESET}"
+# Function to create persistent configuration
+create_persistent_config() {
+    local config_file="/etc/network/interfaces.d/gre-tunnel"
     
     if [[ "$LOCATION" == "1" ]]; then
-        # Test from IRAN side
-        echo "[1] Testing connectivity to FOREIGN server..."
-        if ping -c 3 -I netplas-m2 132.168.30.1 &> /dev/null; then
-            echo -e "${GREEN}[+] Ping to FOREIGN (132.168.30.1): SUCCESS${RESET}"
-        else
-            echo -e "${RED}[!] Ping to FOREIGN: FAILED${RESET}"
-            return 1
-        fi
-        
-        echo "[2] Checking tunnel interface..."
-        if ip link show netplas-m2 &> /dev/null; then
-            echo -e "${GREEN}[+] Tunnel interface exists${RESET}"
-        else
-            echo -e "${RED}[!] Tunnel interface not found${RESET}"
-            return 1
-        fi
-        
-        echo "[3] Checking routing table..."
-        ip route show | grep netplas-m2 && echo -e "${GREEN}[+] Route configured${RESET}" || echo -e "${YELLOW}[!] Route not found${RESET}"
-        
-    elif [[ "$LOCATION" == "2" ]]; then
-        # Test from FOREIGN side
-        echo "[1] Testing connectivity to IRAN server..."
-        if ping -c 3 -I netplas-m2 132.168.30.2 &> /dev/null; then
-            echo -e "${GREEN}[+] Ping to IRAN (132.168.30.2): SUCCESS${RESET}"
-        else
-            echo -e "${RED}[!] Ping to IRAN: FAILED${RESET}"
-            return 1
-        fi
-        
-        echo "[2] Checking ICMP blocking..."
-        if ping -c 2 $IP_FOREIGN &> /dev/null; then
-            echo -e "${YELLOW}[!] ICMP is NOT blocked on public IP${RESET}"
-        else
-            echo -e "${GREEN}[+] ICMP blocked on public IP (security)${RESET}"
-        fi
-    fi
-    
-    echo "[4] Testing tunnel MTU..."
-    local if_mtu=$(ip link show netplas-m2 | grep -o 'mtu [0-9]*' | awk '{print $2}')
-    if [[ "$if_mtu" == "1476" ]]; then
-        echo -e "${GREEN}[+] Tunnel MTU is correctly set to 1476${RESET}"
+        cat > $config_file << EOF
+# GRE Tunnel Configuration - IRAN Server
+auto netplas-m2
+iface netplas-m2 inet static
+    pre-up ip tunnel add \$IFACE mode gre local $IP_IRAN remote $IP_FOREIGN ttl 255
+    address 132.168.30.2
+    netmask 255.255.255.252
+    mtu $(calculate_mtu)
+    txqueuelen 1000
+    post-up ip route add 132.168.30.0/30 dev \$IFACE
+    post-up sysctl -w net.ipv4.conf.\$IFACE.rp_filter=2
+    post-up iptables -t mangle -A POSTROUTING -o \$IFACE -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss \$(( $(calculate_mtu) - 40 ))
+    pre-down ip tunnel del \$IFACE
+EOF
     else
-        echo -e "${YELLOW}[!] Tunnel MTU is $if_mtu (expected 1476)${RESET}"
+        cat > $config_file << EOF
+# GRE Tunnel Configuration - FOREIGN Server
+auto netplas-m2
+iface netplas-m2 inet static
+    pre-up ip tunnel add \$IFACE mode gre local $IP_FOREIGN remote $IP_IRAN ttl 255
+    address 132.168.30.1
+    netmask 255.255.255.252
+    mtu $(calculate_mtu)
+    txqueuelen 1000
+    post-up ip route add 132.168.30.0/30 dev \$IFACE
+    post-up sysctl -w net.ipv4.conf.\$IFACE.rp_filter=2
+    post-up iptables -t mangle -A POSTROUTING -o \$IFACE -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss \$(( $(calculate_mtu) - 40 ))
+    pre-down ip tunnel del \$IFACE
+EOF
     fi
     
-    return 0
+    chmod 600 $config_file
+    echo -e "${GREEN}[+] Persistent configuration created${RESET}"
 }
 
-# Function to show tunnel status
-show_status() {
-    echo -e "${CYAN}${BOLD}"
-    echo "============================================"
-    echo "          TUNNEL STATUS REPORT"
-    echo "============================================"
-    echo -e "${RESET}"
+# Function to test tunnel performance
+test_tunnel_performance() {
+    echo -e "${CYAN}[*] Testing tunnel performance...${RESET}"
     
-    echo -e "${BOLD}Tunnel Interface:${RESET}"
-    ip link show netplas-m2 2>/dev/null || echo "Tunnel not found"
-    
-    echo -e "\n${BOLD}IP Addresses:${RESET}"
-    ip addr show netplas-m2 2>/dev/null | grep -E "inet|mtu"
-    
-    echo -e "\n${BOLD}Routing Table:${RESET}"
-    ip route show | grep netplas-m2 || echo "No routes found for tunnel"
-    
-    echo -e "\n${BOLD}Kernel Parameters:${RESET}"
-    sysctl -n net.ipv4.ip_forward
-    sysctl -n net.ipv4.gre.keepalive_time
-    
-    echo -e "\n${BOLD}IPTables Rules:${RESET}"
-    iptables -L -n -v | grep -E "Chain|netplas" | head -20
-    
-    echo -e "\n${BOLD}Traffic Statistics:${RESET}"
-    ip -s link show netplas-m2 2>/dev/null | grep -A2 "RX\|TX"
-}
-
-# Function to create systemd service
-create_service() {
-    echo -e "${CYAN}[*] Creating systemd service...${RESET}"
-    
-    local service_file="/etc/systemd/system/gre-tunnel.service"
-    
-    cat > $service_file << EOF
-[Unit]
-Description=GRE Tunnel Service
-After=network.target
-Wants=network.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/gre-tunnel-start.sh
-ExecStop=/usr/local/bin/gre-tunnel-stop.sh
-ExecReload=/bin/kill -HUP \$MAINPID
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    # Create start script
-    cat > /usr/local/bin/gre-tunnel-start.sh << 'EOF'
-#!/bin/bash
-# This script has already run and configurations are applied
-# Just check status
-ip link show netplas-m2 &> /dev/null && echo "GRE tunnel is running"
-EOF
-    
-    # Create stop script
-    cat > /usr/local/bin/gre-tunnel-stop.sh << 'EOF'
-#!/bin/bash
-# Stop tunnel
-ip link del netplas-m2 2>/dev/null && echo "GRE tunnel stopped"
-EOF
-    
-    chmod +x /usr/local/bin/gre-tunnel-*.sh
-    systemctl daemon-reload
-    
-    echo -e "${GREEN}[+] Systemd service created${RESET}"
-    echo "To enable auto-start: systemctl enable gre-tunnel"
-}
-
-# Function to create monitoring script
-create_monitor_script() {
-    echo -e "${CYAN}[*] Creating monitoring script...${RESET}"
-    
-    cat > /usr/local/bin/monitor-gre.sh << 'EOF'
-#!/bin/bash
-
-TUNNEL_IP="132.168.30.1"
-LOG_FILE="/var/log/gre-tunnel.log"
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> $LOG_FILE
-}
-
-# Check if tunnel exists
-if ! ip link show netplas-m2 &> /dev/null; then
-    log "ERROR: Tunnel interface not found!"
-    exit 1
-fi
-
-# Ping test
-if ping -c 3 -I netplas-m2 $TUNNEL_IP &> /dev/null; then
-    log "Tunnel is UP - Ping successful"
-    exit 0
-else
-    log "ERROR: Tunnel is DOWN - Ping failed"
-    
-    # Try to restart
-    systemctl restart gre-tunnel 2>/dev/null
-    log "Attempted to restart tunnel service"
-    exit 1
-fi
-EOF
-    
-    chmod +x /usr/local/bin/monitor-gre.sh
-    
-    # Add to crontab
-    (crontab -l 2>/dev/null; echo "*/5 * * * * /usr/local/bin/monitor-gre.sh") | crontab -
-    
-    echo -e "${GREEN}[+] Monitoring script installed (runs every 5 minutes)${RESET}"
-}
-
-# Function to validate IP address
-validate_ip() {
-    local ip=$1
-    if [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        return 0
+    local target_ip=""
+    if [[ "$LOCATION" == "1" ]]; then
+        target_ip="132.168.30.1"
     else
-        return 1
+        target_ip="132.168.30.2"
     fi
+    
+    echo "[1] Basic connectivity test..."
+    ping -c 4 -I netplas-m2 $target_ip | tail -2
+    
+    echo "[2] Testing with different packet sizes..."
+    for size in 64 128 512 1024 1472; do
+        echo -n "  Packet size $size bytes: "
+        ping -c 2 -s $size -I netplas-m2 $target_ip 2>/dev/null | grep "time=" | head -1 || echo "failed"
+    done
+    
+    echo "[3] Checking interface statistics..."
+    ip -s link show netplas-m2 | grep -A2 -E "RX|TX"
+    
+    echo "[4] Testing TCP performance (requires netcat on both sides)..."
+    echo "    Run this on FOREIGN server: nc -l -p 5000 > /dev/null"
+    echo "    Run this on IRAN server: dd if=/dev/zero bs=1M count=100 | nc 132.168.30.1 5000"
+    
+    echo "[5] Checking for packet loss..."
+    ping -c 100 -i 0.1 -I netplas-m2 $target_ip 2>/dev/null | grep "packet loss"
+}
+
+# Function to diagnose performance issues
+diagnose_performance() {
+    echo -e "${CYAN}[*] Diagnosing performance issues...${RESET}"
+    
+    echo "[1] Checking MTU/MSS settings..."
+    ip link show netplas-m2 | grep mtu
+    iptables -t mangle -L -n -v | grep MSS
+    
+    echo "[2] Checking TCP parameters..."
+    sysctl -a 2>/dev/null | grep -E "tcp_.*mem|tcp_congestion|rmem_max|wmem_max" | grep -v default
+    
+    echo "[3] Checking for buffer issues..."
+    ethtool -g eth0 2>/dev/null | head -20 || echo "Cannot check ethtool"
+    
+    echo "[4] Checking interrupt coalescing..."
+    ethtool -c eth0 2>/dev/null | head -15 || echo "Cannot check interrupt settings"
+    
+    echo "[5] Checking system load..."
+    echo "CPU Load: $(uptime)"
+    echo "Memory: $(free -h | grep Mem)"
+    
+    echo "[6] Checking for fragmentation..."
+    cat /proc/net/snmp | grep -E "Ip:.*Frag" | tail -1
+}
+
+# Function to apply quick performance fixes
+apply_performance_fixes() {
+    echo -e "${CYAN}[*] Applying performance fixes...${RESET}"
+    
+    # Increase socket buffers
+    echo "[1] Increasing socket buffers..."
+    sysctl -w net.core.rmem_default=262144
+    sysctl -w net.core.wmem_default=262144
+    sysctl -w net.core.rmem_max=16777216
+    sysctl -w net.core.wmem_max=16777216
+    
+    # Optimize TCP for long paths
+    echo "[2] Optimizing TCP for long paths..."
+    sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
+    sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
+    sysctl -w net.ipv4.tcp_mem="16777216 16777216 16777216"
+    
+    # Disable TCP slow start after idle
+    sysctl -w net.ipv4.tcp_slow_start_after_idle=0
+    
+    # Enable TCP window scaling
+    sysctl -w net.ipv4.tcp_window_scaling=1
+    
+    # Increase connection tracking table
+    echo "[3] Increasing connection tracking..."
+    sysctl -w net.netfilter.nf_conntrack_max=262144
+    sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=86400
+    
+    # Optimize interface
+    echo "[4] Optimizing tunnel interface..."
+    ip link set netplas-m2 txqueuelen 2000 2>/dev/null || true
+    
+    # Apply FQ_Codel if tc is available
+    if command -v tc &> /dev/null; then
+        echo "[5] Applying FQ_Codel queuing discipline..."
+        tc qdisc del dev netplas-m2 root 2>/dev/null
+        tc qdisc add dev netplas-m2 root fq_codel quantum 300 limit 10240 flows 4096 noecn
+    fi
+    
+    echo -e "${GREEN}[+] Performance fixes applied${RESET}"
 }
 
 # Main function
 main() {
     show_header
     check_root
-    check_dependencies
-    check_internet
     
+    echo -e "${YELLOW}This script will optimize GRE tunnel for maximum performance${RESET}"
+    echo ""
+    
+    # Get configuration
     echo "Select server location:"
     echo "1 - IRAN"
     echo "2 - FOREIGN"
     read -p "Enter 1 or 2: " LOCATION
     
     if [[ "$LOCATION" != "1" && "$LOCATION" != "2" ]]; then
-        echo -e "${RED}[!] Invalid selection. Please enter 1 or 2.${RESET}"
+        echo -e "${RED}[!] Invalid selection${RESET}"
         exit 1
     fi
     
@@ -393,39 +424,35 @@ main() {
     read -p "Enter FOREIGN server IP: " IP_FOREIGN
     
     # Validate IPs
-    if ! validate_ip "$IP_IRAN"; then
-        echo -e "${RED}[!] Invalid IRAN IP address${RESET}"
+    if ! [[ $IP_IRAN =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}[!] Invalid IRAN IP${RESET}"
         exit 1
     fi
     
-    if ! validate_ip "$IP_FOREIGN"; then
-        echo -e "${RED}[!] Invalid FOREIGN IP address${RESET}"
+    if ! [[ $IP_FOREIGN =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}[!] Invalid FOREIGN IP${RESET}"
         exit 1
     fi
     
-    # Show configuration summary
-    echo -e "${YELLOW}"
+    # Summary
+    echo -e "${BLUE}"
     echo "Configuration Summary:"
     echo "======================"
-    echo "Server Location: $([ "$LOCATION" == "1" ] && echo "IRAN" || echo "FOREIGN")"
+    echo "Location: $([ "$LOCATION" == "1" ] && echo "IRAN" || echo "FOREIGN")"
     echo "IRAN IP: $IP_IRAN"
     echo "FOREIGN IP: $IP_FOREIGN"
-    echo "Tunnel Network: 132.168.30.0/30"
-    echo "IRAN Tunnel IP: 132.168.30.2"
-    echo "FOREIGN Tunnel IP: 132.168.30.1"
     echo -e "${RESET}"
     
-    read -p "Continue with setup? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Setup cancelled."
-        exit 0
-    fi
+    # Install dependencies
+    install_dependencies
     
-    # Run setup based on location
+    # Optimize system
+    optimize_system
+    
+    # Setup based on location
     if [[ "$LOCATION" == "1" ]]; then
         setup_iran
-    elif [[ "$LOCATION" == "2" ]]; then
+    else
         setup_foreign
     fi
     
@@ -434,43 +461,49 @@ main() {
         exit 1
     fi
     
-    # Test tunnel
-    test_tunnel
+    # Apply performance fixes
+    apply_performance_fixes
     
-    # Show status
+    # Test performance
     echo -e "\n"
-    read -p "Show tunnel status? (y/n): " -n 1 -r
+    read -p "Run performance tests? (y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        show_status
+        test_tunnel_performance
     fi
     
-    # Ask to create services
+    # Show diagnostics
     echo -e "\n"
-    read -p "Create systemd service and monitoring? (y/n): " -n 1 -r
+    read -p "Show performance diagnostics? (y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        create_service
-        create_monitor_script
+        diagnose_performance
     fi
     
     # Final instructions
-    echo -e "${GREEN}${BOLD}"
+    echo -e "\n${GREEN}${BOLD}"
     echo "============================================"
-    echo "          SETUP COMPLETED SUCCESSFULLY"
+    echo "       PERFORMANCE OPTIMIZATION COMPLETE"
     echo "============================================"
     echo -e "${RESET}"
     
-    echo "Next steps:"
-    echo "1. Test connectivity: ping -I netplas-m2 132.168.30.X"
-    echo "2. Check tunnel status: ip link show netplas-m2"
-    echo "3. View traffic: ip -s link show netplas-m2"
-    echo "4. To enable auto-start: systemctl enable gre-tunnel"
-    echo "5. Monitor logs: tail -f /var/log/gre-tunnel.log"
+    echo "Key optimizations applied:"
+    echo "1. Automatic MTU detection and optimization"
+    echo "2. TCP BBR congestion control (if available)"
+    echo "3. Increased socket buffers"
+    echo "4. FQ_Codel queuing discipline"
+    echo "5. MSS clamping for GRE overhead"
+    echo "6. Connection tracking optimizations"
     
-    echo -e "\n${YELLOW}Tunnel IPs:${RESET}"
-    echo "IRAN: 132.168.30.2"
-    echo "FOREIGN: 132.168.30.1"
+    echo -e "\n${YELLOW}Next steps for troubleshooting slow speeds:${RESET}"
+    echo "1. Check MTU: ip link show netplas-m2 | grep mtu"
+    echo "2. Monitor traffic: ip -s link show netplas-m2"
+    echo "3. Test with iperf3:"
+    echo "   FOREIGN: iperf3 -s"
+    echo "   IRAN: iperf3 -c 132.168.30.1 -t 30 -P 4"
+    echo "4. Check for fragmentation: cat /proc/net/snmp | grep Frag"
+    echo "5. Adjust MSS if needed:"
+    echo "   iptables -t mangle -A POSTROUTING -o netplas-m2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1300"
 }
 
 # Run main function
