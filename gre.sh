@@ -4,138 +4,98 @@ YELLOW=$(tput setaf 3)
 RED=$(tput setaf 1)
 GREEN=$(tput setaf 2)
 RESET=$(tput sgr0)
-
 echo -e "${CYAN}"
 echo "===================================="
 echo "        GitHub: netplas"
-echo "   GRE Tunnel v2 (Optimized)"
+echo "   GRE Tunnel v1 Setup Script"
 echo "===================================="
 echo -e "${RESET}"
 
-# بررسی root بودن کاربر
-if [[ $EUID -ne 0 ]]; then
-   echo "${RED}[!] این اسکریپت باید با دسترسی root اجرا شود${RESET}"
-   exit 1
-fi
+echo "Select server location:"
+echo "1 - IRAN"
+echo "2 - FOREIGN"
+read -p "Enter 1 or 2: " LOCATION
 
-echo "انتخاب موقعیت سرور:"
-echo "1 - IRAN (سرور داخلی)"
-echo "2 - FOREIGN (سرور خارجی)"
-read -p "لطفا 1 یا 2 وارد کنید: " LOCATION
+read -p "Enter IRAN server IP: " IP_IRAN
+read -p "Enter FOREIGN server IP: " IP_FOREIGN
 
-read -p "آی‌پی سرور ایران: " IP_IRAN
-read -p "آی‌پی سرور خارج: " IP_FOREIGN
-
-# تنظیمات مشترک برای بهینه‌سازی شبکه
+# Optimize network settings
 optimize_network() {
-    echo "${YELLOW}[*] در حال بهینه‌سازی تنظیمات شبکه...${RESET}"
-    
-    # تنظیمات TCP برای عملکرد بهتر
+    echo "[*] Optimizing network settings..."
+    sysctl -w net.ipv4.ip_forward=1
     sysctl -w net.ipv4.tcp_window_scaling=1
-    sysctl -w net.ipv4.tcp_timestamps=1
     sysctl -w net.ipv4.tcp_sack=1
     sysctl -w net.ipv4.tcp_rmem="4096 87380 33554432"
     sysctl -w net.ipv4.tcp_wmem="4096 65536 33554432"
     sysctl -w net.core.rmem_max=33554432
     sysctl -w net.core.wmem_max=33554432
     sysctl -w net.ipv4.tcp_congestion_control=bbr
-    sysctl -w net.core.default_qdisc=fq
-    
-    # فعال‌سازی IP Forwarding
-    sysctl -w net.ipv4.ip_forward=1
-    sysctl -w net.ipv4.conf.all.forwarding=1
-    sysctl -w net.ipv6.conf.all.forwarding=1
 }
 
 if [[ "$LOCATION" == "1" ]]; then
-    echo "${GREEN}[*] تنظیم سرور ایران...${RESET}"
+    echo "[*] Running config for IRAN server..."
+
+    # Remove existing tunnel if any
+    sudo ip link delete netplas-m2 2>/dev/null
+
+    # Create GRE tunnel with optimized MTU
+    sudo ip tunnel add netplas-m2 mode gre local $IP_IRAN remote $IP_FOREIGN ttl 255
+    sudo ip link set netplas-m2 mtu 1400
+    sudo ip link set netplas-m2 up
+    sudo ip addr add 132.168.30.2/30 dev netplas-m2
     
-    # حذف تانل قبلی اگر وجود دارد
-    ip link delete netplas-m2 2>/dev/null
-    
-    # ایجاد تانل GRE
-    ip tunnel add netplas-m2 mode gre local $IP_IRAN remote $IP_FOREIGN ttl 255
-    ip link set netplas-m2 mtu 1400  # تنظیم MTU پایین‌تر برای جلوگیری از fragmentation
-    ip link set netplas-m2 up
-    
-    # تنظیم IP
-    ip addr add 132.168.30.2/30 dev netplas-m2
-    
-    # تنظیم route (فقط ترافیک خاص از طریق تانل برود)
-    ip route add default via 132.168.30.1 dev netplas-m2 metric 100
-    
-    # تنظیمات شبکه
+    # Optimize network
     optimize_network
     
-    # 🔴 **قوانین iptables اصلاح شده و ایمن**:
-    # 1. فقط NAT برای ترافیک خروجی از تانل
-    iptables -t nat -A POSTROUTING -o netplas-m2 -j MASQUERADE
+    # Fix iptables rules - only NAT traffic going through tunnel
+    sudo iptables -t nat -A POSTROUTING -o netplas-m2 -j MASQUERADE
     
-    # 2. باز کردن پورت SSH فقط برای IP خاص (اختیاری)
-    # iptables -A INPUT -p tcp --dport 22 -s $IP_FOREIGN -j ACCEPT
-    # iptables -A INPUT -p tcp --dport 22 -j DROP
+    # Add QoS for better traffic management
+    sudo tc qdisc add dev netplas-m2 root handle 1: htb default 10 2>/dev/null
+    sudo tc class add dev netplas-m2 parent 1: classid 1:1 htb rate 100mbit burst 15k 2>/dev/null
+    sudo tc class add dev netplas-m2 parent 1:1 classid 1:10 htb rate 80mbit ceil 100mbit burst 15k 2>/dev/null
     
-    # 3. QoS برای تانل (با tc)
-    echo "${YELLOW}[*] تنظیم QoS برای مدیریت ترافیک...${RESET}"
-    tc qdisc add dev netplas-m2 root handle 1: htb default 10
-    tc class add dev netplas-m2 parent 1: classid 1:1 htb rate 100mbit burst 15k
-    tc class add dev netplas-m2 parent 1:1 classid 1:10 htb rate 80mbit ceil 100mbit burst 15k
-    tc qdisc add dev netplas-m2 parent 1:10 sfq perturb 10
-    
-    echo "${GREEN}[✓] سرور ایران آماده است${RESET}"
-    echo "${CYAN}MTU تانل: 1400${RESET}"
-    echo "${CYAN}IP تانل: 132.168.30.2/30${RESET}"
+    echo "[+] IRAN server configured with MTU 1400 and traffic optimization"
 
 elif [[ "$LOCATION" == "2" ]]; then
-    echo "${GREEN}[*] تنظیم سرور خارج...${RESET}"
+    echo "[*] Running config for FOREIGN server..."
+
+    # Remove existing tunnel if any
+    sudo ip link delete netplas-m2 2>/dev/null
+
+    # Create GRE tunnel with optimized MTU
+    sudo ip tunnel add netplas-m2 mode gre local $IP_FOREIGN remote $IP_IRAN ttl 255
+    sudo ip link set netplas-m2 mtu 1400
+    sudo ip link set netplas-m2 up
+    sudo ip addr add 132.168.30.1/30 dev netplas-m2
     
-    # حذف تانل قبلی
-    ip link delete netplas-m2 2>/dev/null
-    
-    # ایجاد تانل
-    ip tunnel add netplas-m2 mode gre local $IP_FOREIGN remote $IP_IRAN ttl 255
-    ip link set netplas-m2 mtu 1400
-    ip link set netplas-m2 up
-    
-    # تنظیم IP
-    ip addr add 132.168.30.1/30 dev netplas-m2
-    
-    # تنظیمات شبکه
+    # Optimize network
     optimize_network
     
-    # مسیریابی برای ترافیک بازگشتی
-    # ip route add <شبکه ایران> via 132.168.30.2 dev netplas-m2
+    # Better ICMP filtering (rate limiting instead of complete block)
+    sudo iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/second -j ACCEPT
+    sudo iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
     
-    # 🔴 **مسدودسازی ICMP اصلاح شده**:
-    # فقط ICMP flood مسدود شود
-    iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/second -j ACCEPT
-    iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
+    # Add QoS for better traffic management
+    sudo tc qdisc add dev netplas-m2 root handle 1: htb default 10 2>/dev/null
+    sudo tc class add dev netplas-m2 parent 1: classid 1:1 htb rate 500mbit burst 15k 2>/dev/null
+    sudo tc class add dev netplas-m2 parent 1:1 classid 1:10 htb rate 400mbit ceil 500mbit burst 15k 2>/dev/null
     
-    # QoS برای سرور خارج
-    tc qdisc add dev netplas-m2 root handle 1: htb default 10
-    tc class add dev netplas-m2 parent 1: classid 1:1 htb rate 500mbit burst 15k
-    tc class add dev netplas-m2 parent 1:1 classid 1:10 htb rate 400mbit ceil 500mbit burst 15k
-    tc qdisc add dev netplas-m2 parent 1:10 sfq perturb 10
-    
-    echo "${GREEN}[✓] سرور خارج آماده است${RESET}"
-    echo "${CYAN}MTU تانل: 1400${RESET}"
-    echo "${CYAN}IP تانل: 132.168.30.1/30${RESET}"
+    echo "[+] FOREIGN server configured with MTU 1400 and traffic optimization"
 
 else
-    echo "${RED}[!] انتخاب نامعتبر. لطفاً 1 یا 2 وارد کنید.${RESET}"
+    echo "[!] Invalid selection. Please enter 1 or 2."
     exit 1
 fi
 
-# تست اتصال
-echo "${YELLOW}[*] در حال تست تانل...${RESET}"
+# Test tunnel connectivity
+echo "[*] Testing tunnel connection..."
 if [[ "$LOCATION" == "1" ]]; then
-    ping -c 3 -M do -s 1300 132.168.30.1 2>/dev/null && echo "${GREEN}[✓] تانل فعال است${RESET}" || echo "${RED}[!] مشکل در تانل${RESET}"
+    ping -c 2 -M do -s 1300 132.168.30.1 >/dev/null 2>&1 && echo "[+] Tunnel is working" || echo "[!] Tunnel test failed"
 elif [[ "$LOCATION" == "2" ]]; then
-    ping -c 3 -M do -s 1300 132.168.30.2 2>/dev/null && echo "${GREEN}[✓] تانل فعال است${RESET}" || echo "${RED}[!] مشکل در تانل${RESET}"
+    ping -c 2 -M do -s 1300 132.168.30.2 >/dev/null 2>&1 && echo "[+] Tunnel is working" || echo "[!] Tunnel test failed"
 fi
 
-echo "${CYAN}====================================${RESET}"
-echo "${GREEN}برای پاک‌کردن تنظیمات:${RESET}"
-echo "ip link delete netplas-m2"
-echo "iptables -t nat -F"
-echo "${CYAN}====================================${RESET}"
+echo "===================================="
+echo "To remove tunnel: sudo ip link delete netplas-m2"
+echo "===================================="
