@@ -18,7 +18,7 @@ show_header() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo "============================================"
-    echo "        GitHub: AbrDade"
+    echo "        GitHub: netplas"
     echo "   GRE Tunnel v2.0 - Enhanced Setup"
     echo "============================================"
     echo -e "${RESET}"
